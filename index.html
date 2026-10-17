@@ -5,6 +5,9 @@
   the raw text back to the bot that opened it, through Telegram.WebApp.sendData.
   It stores nothing, calls no server and knows nothing about receipts, so one
   hosted copy serves every Nexus instance and every country.
+
+  Flow: each read closes the scanner and shows a confirmation, so the owner
+  always knows a code was taken. Codes are sent with Telegram's main button.
 -->
 <html lang="en">
 <head>
@@ -19,6 +22,9 @@
       --hint: var(--tg-theme-hint-color, #6b6b6b);
       --button: var(--tg-theme-button-color, #2481cc);
       --button-text: var(--tg-theme-button-text-color, #ffffff);
+      --surface: var(--tg-theme-secondary-bg-color, #f2f2f5);
+      --ok: #2e9d57;
+      --warn: #c98a00;
     }
     * { box-sizing: border-box; }
     body {
@@ -29,20 +35,35 @@
     }
     h1 { margin: 0; font-size: 20px; }
     p { margin: 0; color: var(--hint); }
+    [hidden] { display: none !important; }
+    .status {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 28px 16px; border-radius: 14px; background: var(--surface); text-align: center;
+    }
+    .mark {
+      width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center;
+      font-size: 34px; font-weight: 700; color: #ffffff; background: var(--ok);
+    }
+    .status.repeat .mark { background: var(--warn); }
+    .status strong { font-size: 18px; }
+    .status.fresh { animation: pop 0.25s ease-out; }
+    @keyframes pop { from { transform: scale(0.94); opacity: 0.4; } to { transform: none; opacity: 1; } }
     button {
       border: 0; border-radius: 10px; padding: 14px; font: inherit; font-weight: 600;
       background: var(--button); color: var(--button-text);
     }
-    button[hidden] { display: none; }
-    #count { font-size: 32px; font-weight: 700; color: var(--text); }
+    button.secondary { background: var(--surface); color: var(--text); }
   </style>
 </head>
 <body>
   <h1 id="title"></h1>
   <p id="hint"></p>
-  <div><span id="count">0</span> <span id="countLabel"></span></div>
+  <div id="status" class="status" hidden>
+    <div class="mark" id="mark">✓</div>
+    <strong id="statusTitle"></strong>
+    <p id="statusCount"></p>
+  </div>
   <button id="scan" type="button"></button>
-  <button id="send" type="button" hidden></button>
   <script>
     "use strict";
     const PAYLOAD_VERSION = 1;
@@ -50,32 +71,41 @@
 
     const TEXT = {
       pt: {
-        title: "Escanear notas", hint: "Aponte para o QR de cada nota. Ao fechar o leitor, as notas vão para o chat.",
-        scan: "Abrir leitor", send: "Enviar", countLabel: "código(s) lido(s)",
-        popup: "Aponte para o QR da nota",
+        title: "Escanear notas", hint: "Aponte a câmera para o QR da nota.",
+        scan: "Abrir leitor", again: "Ler outra nota", popup: "Aponte para o QR da nota",
+        read: "Nota lida", repeat: "Essa nota já foi lida", full: "Limite atingido, envie estas primeiro",
+        count: (n) => (n === 1 ? "1 nota pronta para enviar" : `${n} notas prontas para enviar`),
+        send: (n) => (n === 1 ? "Enviar 1 nota" : `Enviar ${n} notas`),
         unsupported: "Atualize o Telegram para usar o leitor de QR.",
       },
       es: {
-        title: "Escanear comprobantes", hint: "Apunta al QR de cada comprobante. Al cerrar el lector, se envían al chat.",
-        scan: "Abrir lector", send: "Enviar", countLabel: "código(s) leído(s)",
-        popup: "Apunta al QR del comprobante",
+        title: "Escanear comprobantes", hint: "Apunta la cámara al QR del comprobante.",
+        scan: "Abrir lector", again: "Leer otro comprobante", popup: "Apunta al QR del comprobante",
+        read: "Comprobante leído", repeat: "Este comprobante ya fue leído", full: "Límite alcanzado, envía estos primero",
+        count: (n) => (n === 1 ? "1 comprobante listo para enviar" : `${n} comprobantes listos para enviar`),
+        send: (n) => (n === 1 ? "Enviar 1 comprobante" : `Enviar ${n} comprobantes`),
         unsupported: "Actualiza Telegram para usar el lector de QR.",
       },
       en: {
-        title: "Scan receipts", hint: "Point at each receipt QR code. Closing the scanner sends them to the chat.",
-        scan: "Open scanner", send: "Send", countLabel: "code(s) read",
-        popup: "Point at the receipt QR code",
+        title: "Scan receipts", hint: "Point the camera at the receipt QR code.",
+        scan: "Open scanner", again: "Scan another receipt", popup: "Point at the receipt QR code",
+        read: "Receipt read", repeat: "This receipt was already read", full: "Limit reached, send these first",
+        count: (n) => (n === 1 ? "1 receipt ready to send" : `${n} receipts ready to send`),
+        send: (n) => (n === 1 ? "Send 1 receipt" : `Send ${n} receipts`),
         unsupported: "Update Telegram to use the QR scanner.",
       },
     };
 
     const app = window.Telegram && window.Telegram.WebApp;
-    const lang = ((app && app.initDataUnsafe.user && app.initDataUnsafe.user.language_code) || navigator.language || "en").slice(0, 2);
+    const user = app && app.initDataUnsafe && app.initDataUnsafe.user;
+    const lang = ((user && user.language_code) || navigator.language || "en").slice(0, 2);
     const t = TEXT[lang] || TEXT.en;
     document.documentElement.lang = lang;
 
     const $ = (id) => document.getElementById(id);
-    for (const key of ["title", "hint", "scan", "send", "countLabel"]) $(key).textContent = t[key];
+    $("title").textContent = t.title;
+    $("hint").textContent = t.hint;
+    $("scan").textContent = t.scan;
 
     const codes = new Set();
 
@@ -83,26 +113,48 @@
       return JSON.stringify({ v: PAYLOAD_VERSION, codes: list });
     }
 
-    function send() {
-      if (codes.size) app.sendData(encoded([...codes]));
+    function show(kind) {
+      const status = $("status");
+      status.hidden = false;
+      status.classList.toggle("repeat", kind !== "read");
+      status.classList.remove("fresh");
+      void status.offsetWidth; // restart the animation on every read
+      status.classList.add("fresh");
+      $("mark").textContent = kind === "read" ? "✓" : "!";
+      $("statusTitle").textContent = t[kind];
+      $("statusCount").textContent = t.count(codes.size);
+      $("scan").textContent = t.again;
+      $("scan").className = "secondary";
+      app.MainButton.setText(t.send(codes.size));
+      app.MainButton.show();
+      app.enableClosingConfirmation(); // unsent codes would be lost
     }
 
     function onCode(text) {
       const code = (text || "").trim();
-      if (!code || codes.has(code)) return false;
-      if (new TextEncoder().encode(encoded([...codes, code])).length > MAX_BYTES) {
-        send(); // payload is full: send what fits, the next code goes in the next round
-        return true;
+      if (!code) return false;
+      if (codes.has(code)) {
+        app.HapticFeedback.notificationOccurred("warning");
+        show("repeat");
+      } else if (new TextEncoder().encode(encoded([...codes, code])).length > MAX_BYTES) {
+        app.HapticFeedback.notificationOccurred("error");
+        show("full");
+      } else {
+        codes.add(code);
+        app.HapticFeedback.notificationOccurred("success");
+        show("read");
       }
-      codes.add(code);
-      app.HapticFeedback.notificationOccurred("success");
-      $("count").textContent = String(codes.size);
-      $("send").hidden = false;
-      return false; // keep the scanner open for the next receipt
+      return true; // close the scanner so the confirmation is visible
     }
 
     function scan() {
       app.showScanQrPopup({ text: t.popup }, onCode);
+    }
+
+    function send() {
+      if (!codes.size) return;
+      app.disableClosingConfirmation();
+      app.sendData(encoded([...codes]));
     }
 
     if (!app || !app.isVersionAtLeast("6.4")) {
@@ -111,9 +163,8 @@
     } else {
       app.ready();
       app.expand();
-      app.onEvent("scanQrPopupClosed", send);
+      app.MainButton.onClick(send);
       $("scan").addEventListener("click", scan);
-      $("send").addEventListener("click", send);
       scan();
     }
   </script>

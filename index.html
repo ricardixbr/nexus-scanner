@@ -1,0 +1,121 @@
+<!doctype html>
+<!--
+  Nexus scanner Mini App (ADR-0006).
+  Instance-agnostic: it reads QR codes with Telegram's native scanner and hands
+  the raw text back to the bot that opened it, through Telegram.WebApp.sendData.
+  It stores nothing, calls no server and knows nothing about receipts, so one
+  hosted copy serves every Nexus instance and every country.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus scanner</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #ffffff);
+      --text: var(--tg-theme-text-color, #111111);
+      --hint: var(--tg-theme-hint-color, #6b6b6b);
+      --button: var(--tg-theme-button-color, #2481cc);
+      --button-text: var(--tg-theme-button-text-color, #ffffff);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 16px; min-height: 100vh;
+      font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    h1 { margin: 0; font-size: 20px; }
+    p { margin: 0; color: var(--hint); }
+    button {
+      border: 0; border-radius: 10px; padding: 14px; font: inherit; font-weight: 600;
+      background: var(--button); color: var(--button-text);
+    }
+    button[hidden] { display: none; }
+    #count { font-size: 32px; font-weight: 700; color: var(--text); }
+  </style>
+</head>
+<body>
+  <h1 id="title"></h1>
+  <p id="hint"></p>
+  <div><span id="count">0</span> <span id="countLabel"></span></div>
+  <button id="scan" type="button"></button>
+  <button id="send" type="button" hidden></button>
+  <script>
+    "use strict";
+    const PAYLOAD_VERSION = 1;
+    const MAX_BYTES = 4000; // Telegram caps sendData at 4096 bytes.
+
+    const TEXT = {
+      pt: {
+        title: "Escanear notas", hint: "Aponte para o QR de cada nota. Ao fechar o leitor, as notas vão para o chat.",
+        scan: "Abrir leitor", send: "Enviar", countLabel: "código(s) lido(s)",
+        popup: "Aponte para o QR da nota",
+        unsupported: "Atualize o Telegram para usar o leitor de QR.",
+      },
+      es: {
+        title: "Escanear comprobantes", hint: "Apunta al QR de cada comprobante. Al cerrar el lector, se envían al chat.",
+        scan: "Abrir lector", send: "Enviar", countLabel: "código(s) leído(s)",
+        popup: "Apunta al QR del comprobante",
+        unsupported: "Actualiza Telegram para usar el lector de QR.",
+      },
+      en: {
+        title: "Scan receipts", hint: "Point at each receipt QR code. Closing the scanner sends them to the chat.",
+        scan: "Open scanner", send: "Send", countLabel: "code(s) read",
+        popup: "Point at the receipt QR code",
+        unsupported: "Update Telegram to use the QR scanner.",
+      },
+    };
+
+    const app = window.Telegram && window.Telegram.WebApp;
+    const lang = ((app && app.initDataUnsafe.user && app.initDataUnsafe.user.language_code) || navigator.language || "en").slice(0, 2);
+    const t = TEXT[lang] || TEXT.en;
+    document.documentElement.lang = lang;
+
+    const $ = (id) => document.getElementById(id);
+    for (const key of ["title", "hint", "scan", "send", "countLabel"]) $(key).textContent = t[key];
+
+    const codes = new Set();
+
+    function encoded(list) {
+      return JSON.stringify({ v: PAYLOAD_VERSION, codes: list });
+    }
+
+    function send() {
+      if (codes.size) app.sendData(encoded([...codes]));
+    }
+
+    function onCode(text) {
+      const code = (text || "").trim();
+      if (!code || codes.has(code)) return false;
+      if (new TextEncoder().encode(encoded([...codes, code])).length > MAX_BYTES) {
+        send(); // payload is full: send what fits, the next code goes in the next round
+        return true;
+      }
+      codes.add(code);
+      app.HapticFeedback.notificationOccurred("success");
+      $("count").textContent = String(codes.size);
+      $("send").hidden = false;
+      return false; // keep the scanner open for the next receipt
+    }
+
+    function scan() {
+      app.showScanQrPopup({ text: t.popup }, onCode);
+    }
+
+    if (!app || !app.isVersionAtLeast("6.4")) {
+      $("hint").textContent = t.unsupported;
+      $("scan").hidden = true;
+    } else {
+      app.ready();
+      app.expand();
+      app.onEvent("scanQrPopupClosed", send);
+      $("scan").addEventListener("click", scan);
+      $("send").addEventListener("click", send);
+      scan();
+    }
+  </script>
+</body>
+</html>
